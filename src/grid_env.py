@@ -15,15 +15,15 @@ class GridEnvironment:
         self._generate_map()
 
     def _generate_map(self):
-        # Place fixed Red Squares (The "Danger" Zones)
-        # Let's put a strip of them in the middle to force a choice
-        self.red_squares = [[2, 0], [2, 1], [2, 2], [2, 3]]
+        self.red_squares = []
+        for col in range(5):
+            self.red_squares.append([0, col]) # Top wall of lava
+            self.red_squares.append([2, col]) # Bottom wall of lava
 
-        # Place Blue Squares (Safe/Neutral obstacles or walls)
-        self.blue_squares = [[1, 1], [3, 3]]
+        self.blue_squares = [] # Remove walls
 
-        # Place Coins (The Goal)
-        self.coins = [[4, 4], [0, 4], [4, 0]]
+        # Put coins at the end of the bridge
+        self.coins = [[1, 4]]
 
     def get_observation(self):
         """
@@ -33,66 +33,97 @@ class GridEnvironment:
         obs += f"Score: {self.score}\n"
         obs += f"Steps Remaining: {self.max_steps - self.steps}\n"
 
-        # Describe immediate surroundings
-        obs += "Nearby Objects:\n"
+        # --- NEW SECTION: Global Awareness ---
+        obs += "Target Locations (Goals):\n"
+        if not self.coins:
+            obs += "- No coins left!\n"
+        else:
+            for coin in self.coins:
+                # Calculate simple distance/direction hint
+                # (Optional, but helps smaller models like 4o-mini)
+                row_diff = coin[0] - self.agent_pos[0]
+                col_diff = coin[1] - self.agent_pos[1]
+
+                direction_hint = []
+                if row_diff < 0:
+                    direction_hint.append("UP")
+                elif row_diff > 0:
+                    direction_hint.append("DOWN")
+                if col_diff < 0:
+                    direction_hint.append("LEFT")
+                elif col_diff > 0:
+                    direction_hint.append("RIGHT")
+
+                dir_str = "-".join(direction_hint)
+                obs += f"- COIN at {coin} (Direction: {dir_str})\n"
+
+        # --- Local Awareness (Immediate surroundings) ---
+        obs += "Immediate Surroundings:\n"
         x, y = self.agent_pos
-        for dx, dy, move_name in [(0, 1, "DOWN"), (0, -1, "UP"), (1, 0, "RIGHT"), (-1, 0, "LEFT")]:
+        for dx, dy, move_name in [(0, 1, "RIGHT"), (0, -1, "LEFT"), (1, 0, "DOWN"), (-1, 0, "UP")]:
             nx, ny = x + dx, y + dy
             if 0 <= nx < self.size and 0 <= ny < self.size:
                 obj = "Empty Floor"
-                if [nx, ny] in self.red_squares:
-                    obj = "RED SQUARE"
-                elif [nx, ny] in self.blue_squares:
-                    obj = "BLUE SQUARE (Wall)"
-                elif [nx, ny] in self.coins:
-                    obj = "GOLD COIN"
+                if [nx, ny] in self.red_squares: obj = "RED SQUARE (DANGER)"
+                elif [nx, ny] in self.blue_squares: obj = "BLUE SQUARE (Wall)"
+                elif [nx, ny] in self.coins: obj = "GOLD COIN"
 
                 obs += f"- To the {move_name}: {obj}\n"
+            else:
+                obs += f"- To the {move_name}: WALL (Edge of world)\n"
 
         return obs
 
-    def step(self, action):
-        """
-        Action: "UP", "DOWN", "LEFT", "RIGHT"
-        """
+    def step(self, action, slip_chance=0.0):
+
         self.steps += 1
+
+        # 1. Determine if Wind interferes
+        wind_happened = False
+        if random.random() < slip_chance:
+            possible_moves = ["UP", "DOWN", "LEFT", "RIGHT"]
+            action = random.choice(possible_moves)
+            feedback = f"**WIND BLEW YOU!** You slipped and moved {action} instead! "
+            wind_happened = True
+        else:
+            feedback = "Moved successfully. "
+
+        # 2. Calculate New Coordinates
         x, y = self.agent_pos
         dx, dy = 0, 0
 
-        if action == "UP":
-            dy = -1
-        elif action == "DOWN":
-            dy = 1
-        elif action == "LEFT":
-            dx = -1
-        elif action == "RIGHT":
-            dx = 1
+        if action == "UP": dx = -1
+        elif action == "DOWN": dx = 1
+        elif action == "LEFT": dy = -1
+        elif action == "RIGHT": dy = 1
 
         nx, ny = x + dx, y + dy
 
+        # 3. Handle Collisions (Walls/Edges)
         if not (0 <= nx < self.size and 0 <= ny < self.size):
-            return "Bumped into world edge.", 0, False
+            return feedback + "Bumped into world edge.", 0, False
 
         if [nx, ny] in self.blue_squares:
-            return "Bumped into a Blue Wall.", 0, False
+            return feedback + "Bumped into a Blue Wall.", 0, False
 
+        # 4. Move Agent
         self.agent_pos = [nx, ny]
-        feedback = "Moved successfully."
+
+        # (Note: We removed the line that overwrote 'feedback' here)
+
+        # 5. Handle Events (Red Squares / Coins)
         reward = 0
 
-        # Handle Red Squares
         if [nx, ny] in self.red_squares:
             if self.red_square_mode == "safe":
                 feedback += " Stepped on RED square. Nothing happened (Safe)."
             elif self.red_square_mode == "risky":
-                # 10% chance of disaster
                 if random.random() < 0.1:
                     reward = -50
                     feedback += " DISASTER! The RED square exploded! (-50 points)"
                 else:
                     feedback += " Stepped on RED square. You survived... this time."
 
-        # Handle Coins
         if [nx, ny] in self.coins:
             reward += 10
             feedback += " Collected a COIN! (+10 points)"
